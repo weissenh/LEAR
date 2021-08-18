@@ -1,15 +1,17 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8; -*-
 import argparse
 import os
 import random
 import time
-import unicodedata
+# import unicodedata
 from functools import partial
 
 import torch
 from torch import nn
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+from tqdm import tqdm, trange
 
 from model import HRLModel, PAD_token, EOS_token
 from utils import AverageMeter
@@ -24,6 +26,9 @@ import pdb
 USE_CUDA = torch.cuda.is_available()
 global_step = 0
 
+COGS_DATADIR = "./cogs_data/"
+TRAIN_FILENAME = "train.tsv"  # as opposed to train_100.tsv  # for each train set separate preprocessing!
+PREPROCESS_DATADIR = "./preprocess/"
 
 class Lang:
     def __init__(self, name):
@@ -75,11 +80,11 @@ class Lang:
             self.index_word(word)
 
 
-def unicode_to_ascii(s):
-    return ''.join(
-        c for c in unicodedata.normalize('NFD', s)
-        if unicodedata.category(c) != 'Mn'
-    )
+# def unicode_to_ascii(s): # commented out - can't find any usage todo delete unused code?
+#     return ''.join(
+#         c for c in unicodedata.normalize('NFD', s)
+#         if unicodedata.category(c) != 'Mn'
+#     )
 
 def data_file_process(file):
     with open(file, 'r') as f:
@@ -90,7 +95,7 @@ def data_file_process(file):
             input = line[0].strip(' .')
             output = line[1].strip('"')
             input_tokens = input.split()
-            if len(input_tokens) <= 1:
+            if len(input_tokens) <= 1:  # 'primitives' are ignored during training (handled by preprocessing already?)
                 continue
             line_norm = [input, output]
             lines_norm.append(line_norm)
@@ -99,10 +104,10 @@ def data_file_process(file):
 def read_data(lang1, lang2, task_name):
     print("Reading dataset from task {}...".format(task_name))
 
-    file_train = 'cogs_data/train.tsv'
-    file_dev = 'cogs_data/dev.tsv'
-    file_test = 'cogs_data/test.tsv'
-    file_gen = 'cogs_data/gen.tsv'
+    file_train = os.path.join(COGS_DATADIR, TRAIN_FILENAME)  # todo: try train_100.tsv instead
+    file_dev = os.path.join(COGS_DATADIR, 'dev.tsv')
+    file_test = os.path.join(COGS_DATADIR, 'test.tsv')
+    file_gen = os.path.join(COGS_DATADIR, 'gen.tsv')
 
     pairs_train = data_file_process(file_train)
     pairs_dev = data_file_process(file_dev)
@@ -114,33 +119,46 @@ def read_data(lang1, lang2, task_name):
 
     return _input_lang, _output_lang, pairs_train, pairs_dev, pairs_test, pairs_gen
 
+def update_lang_with_file(filename: str, lang: Lang) -> Lang:
+    """
+    Add all tokens from the file filename to the language lang and return it
+
+    :param filename: File path, file with one token per line
+    :param lang: Language to be extended with tokens form the file (word2id and count)
+    :return: modified Language, now incorporating all tokens of the file
+    """
+    with open(filename, 'r') as f:
+        tokens = f.readlines()
+        for token in tokens:
+            lang.index_word(token.strip("\n"))
+    return lang
+
+def read_list_from_file(filename: str) -> list:
+    """
+    get a list of strings (lines) from the file
+
+    :param filename: filepath, file with one token per line
+    :return: list of all tokens
+    """
+    stringlist = []
+    with open(filename, 'r') as f:
+        tokens = f.readlines()
+        for token in tokens:
+            stringlist.append(token.strip("\n"))
+    return stringlist
+
 def prepare_dataset(lang1, lang2, task_name):
     global input_lang
     global output_lang
     assert task_name == "cogs"
     input_lang, output_lang, pairs_train, pairs_dev, pairs_test, pairs_gen = read_data(lang1, lang2, task_name)
 
-    encode_token_filename = './preprocess/encode_tokens.txt'
-    with open(encode_token_filename, 'r') as f:
-        encode_tokens = f.readlines()
-        for encode_token in encode_tokens:
-            input_lang.index_word(encode_token.strip("\n"))
+    encode_token_filename = os.path.join(PREPROCESS_DATADIR, 'encode_tokens.txt')
+    input_lang = update_lang_with_file(encode_token_filename, lang=input_lang)
 
-    decode_entity_filename = './preprocess/entity'
-    with open(decode_entity_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            output_lang.index_word(decode_token.strip("\n"))
-    decode_caus_predicate_filename = './preprocess/caus_predicate'
-    with open(decode_caus_predicate_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            output_lang.index_word(decode_token.strip("\n"))
-    decode_unac_predicate_filename = './preprocess/unac_predicate'
-    with open(decode_unac_predicate_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            output_lang.index_word(decode_token.strip("\n"))
+    for decode_filename in ['entity', 'caus_predicate', 'unac_predicate']:
+        full_path = os.path.join(PREPROCESS_DATADIR, decode_filename)
+        output_lang = update_lang_with_file(full_path, lang=output_lang)
 
     return input_lang, output_lang, pairs_train, pairs_dev, pairs_test, pairs_gen
 
@@ -235,10 +253,11 @@ def test(test_data, model, example2type, device, log_file=None):
     model.eval()
     start = time.time()
 
-    file_right = 'gen_right.txt'
-    file_wrong = 'gen_wrong.txt'
+    file_right = './gen_right.txt'
+    file_wrong = './gen_wrong.txt'
 
     type_right_count = {}
+    # skipped = 0
 
     with torch.no_grad():
         progress_bar = tqdm(range(len(test_data)))
@@ -247,9 +266,19 @@ def test(test_data, model, example2type, device, log_file=None):
             # test_data_example[0] = 'a squirrel on a computer drew'
             # test_data_example[0] = 'a girl on the table helped emma'
             # pdb.set_trace()
+            example_type = example2type[test_data_example[0]]
+            if example_type not in type_right_count:
+                type_right_count[example_type] = []
+
             try:
                 tokens_list = [indexes_from_sentence(input_lang, test_data_example[0], 'input')]
-            except:
+            except Exception as e:  # KeyError 'monastery', 'gardner' ?
+                # logger.info(f"Warning: Test: Skipped sentence no. {idx}: {test_data_example[0]}. Type: {example_type}. Exception message: {str(e)}")
+                # skipped += 1
+                # PW: added this so that accuracy values include skipped sentences:
+                type_right_count[example_type].append(0)  # 0 accuracy
+                accuracy_meter.update(value=0, n=1)  # 1 sample with 0 accuracy observed
+                # note: stil a skipped sentence is not written to gen_wrong.txt
                 continue
             tokens = Variable(torch.LongTensor(tokens_list))
             if USE_CUDA:
@@ -264,12 +293,9 @@ def test(test_data, model, example2type, device, log_file=None):
             # pdb.set_trace()
             accuracy = torch.tensor(accuracy).mean()
 
-            example_type = example2type[test_data_example[0]]
-            if example_type not in type_right_count:
-                type_right_count[example_type] = []
             type_right_count[example_type].append(accuracy.item())
 
-            # if accuracy == 1:
+            # if accuracy == 1:  # pw todo rather have verbosity flag, also better overall 'w' than 'a' (re-runs)?
             #     with open(file_right, 'a') as f:
             #         f.write(example_type + '\n')
             #         f.write(test_data_example[0] + '\n')
@@ -291,9 +317,11 @@ def test(test_data, model, example2type, device, log_file=None):
             n_entropy_meter.update(normalized_entropy.item(), n)
             progress_bar.set_description("Test Acc {:.1f}%".format(accuracy_meter.avg * 100))
 
+    # logger.info(f"Finished testing: Accuracy {accuracy_meter.avg*100:.4f}% (N = {accuracy_meter.count}), including {skipped} skipped sentences ")
     return accuracy_meter.avg, type_right_count
 
-
+# pw todo test and validate are strikingly similar: refactor into one?
+# pw todo device not used: can we delete this parameter then?
 def validate(valid_data, model, epoch, device, logger):
     loading_time_meter = AverageMeter()
     batch_time_meter = AverageMeter()
@@ -314,12 +342,16 @@ def validate(valid_data, model, epoch, device, logger):
     file_wrong = 'dev_wrong.txt'
     skip_count = 0
     with torch.no_grad():
+        #for idx, valid_data_example in tqdm(enumerate(valid_data), total=len(valid_data)):
         for idx, valid_data_example in enumerate(valid_data):
             # print(idx)
             try:
                 tokens_list = [indexes_from_sentence(input_lang, valid_data_example[0], 'input')]
-            except:
+            except Exception as e:
+                logger.info(f"Validation: Skipped sentence no. {idx}: {valid_data_example}. Exception message: {str(e)}")  # KeyError?
                 skip_count += 1
+                # todo skipped sentence not added to the accuracy meter: will change stopping criterion and maybe unreachable (OOV token?)
+                # accuracy_meter.update(0, 1)  # 0 accuracy for this 1 sample
                 continue
             tokens = Variable(torch.LongTensor(tokens_list))
             if USE_CUDA:
@@ -393,7 +425,7 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
     model.train()
     start = time.time()
 
-    if len(train_data) < 100:
+    if len(train_data) < 100:  # pw todo what does this do? is this some debugging to repeat train data?
         train_data = [pair for pair in train_data for _ in range(8)]
     elif len(train_data) < 500:
         train_data = [pair for pair in train_data for _ in range(2)]
@@ -407,7 +439,8 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
         batch_num = len(train_data) // batch_size + 1
 
     val_accuracy = 0.
-    for batch_idx in range(batch_num):
+    #for batch_idx in range(batch_num):
+    for batch_idx in trange(batch_num, desc=f"Epoch {epoch:>3}: Batches: "):
         if (batch_idx + 1) * batch_size < len(train_data):
             train_pairs = train_data[batch_idx * batch_size:(batch_idx + 1) * batch_size]
         else:
@@ -499,7 +532,7 @@ def train(train_data, valid_data, model, optimizer, epoch, args, logger,
         global global_step
         global_step += 1
 
-        if batch_num <= 3000:
+        if batch_num <= 3000:  # pw todo why is this needed?
             val_num = batch_num
         else:
             val_num = 3000
@@ -549,7 +582,7 @@ def train_model(args, task_name, logger):
     global input_lang
     global output_lang
 
-    input_lang, output_lang, pairs_train, pairs_dev, _, pairs_gen = prepare_dataset('nl', 'sparql', task_name)
+    input_lang, output_lang, pairs_train, pairs_dev, _, pairs_gen = prepare_dataset('nl', 'logicform', task_name)
 
     train_data, dev_data, gen_data = pairs_train, pairs_dev, pairs_gen
 
@@ -559,36 +592,24 @@ def train_model(args, task_name, logger):
     dev_data.sort(key=lambda p: len(p[0].split()))
     dev_data = [list(item) for item in dev_data]
 
-    print(random.choice(train_data))
-    print(random.choice(dev_data))
+    print("Example from train set: ", random.choice(train_data))  # todo get rid of this debug message?
+    print("Example from dev set: ", random.choice(dev_data))  # todo get rid of this debug message?
 
     args.vocab_size = input_lang.n_words
     args.label_size = output_lang.n_words
 
     # read pre-alignment file
-    alignment_filename = './preprocess/enct2dect'
+    alignment_filename = os.path.join(PREPROCESS_DATADIR, 'enct2dect')
     alignments_idx = get_alignment(alignment_filename, input_lang, output_lang)
 
-    entity_list = []
-    entity_filename = './preprocess/entity'
-    with open(entity_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            entity_list.append(decode_token.strip("\n"))
+    entity_filename = os.path.join(PREPROCESS_DATADIR, 'entity')
+    entity_list = read_list_from_file(entity_filename)
 
-    caus_predicate_list = []
-    caus_predicate_filename = './preprocess/caus_predicate'
-    with open(caus_predicate_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            caus_predicate_list.append(decode_token.strip("\n"))
+    caus_predicate_filename = os.path.join(PREPROCESS_DATADIR, 'caus_predicate')
+    caus_predicate_list = read_list_from_file(caus_predicate_filename)
 
-    unac_predicate_list = []
-    unac_predicate_filename = './preprocess/unac_predicate'
-    with open(unac_predicate_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            unac_predicate_list.append(decode_token.strip("\n"))
+    unac_predicate_filename = os.path.join(PREPROCESS_DATADIR, 'unac_predicate')
+    unac_predicate_list = read_list_from_file(unac_predicate_filename)
 
     model = HRLModel(vocab_size=args.vocab_size,
                      word_dim=args.word_dim,
@@ -655,9 +676,10 @@ def train_model(args, task_name, logger):
                                                   total_batch_num, data_len, regular_weight)
 
         if val_accuracy == 1.:
-            final_dev_acc = validate(train_data+dev_data, model, epoch, 0, logger)
+            final_dev_acc = validate(train_data+dev_data, model, epoch, device=args.gpu_id, logger=logger)
             if final_dev_acc == 1.:
-                validate(gen_data, model, epoch, 0, logger)
+                print("accuracy on train+dev is 1, stop training, now testing on gen set...")
+                validate(gen_data, model, epoch, device=args.gpu_id, logger=logger)
                 logger.info("saving model...")
                 best_model_path = f"{args.model_dir}/{epoch}-final.mdl"
                 torch.save({"epoch": epoch, "batch_idx": "final", "state_dict": model.state_dict()}, best_model_path)
@@ -665,11 +687,13 @@ def train_model(args, task_name, logger):
                 break
 
 
+# pw todo beginning of this is strikingly similar to train model
+# pw todo logger is None according to make_path_preparations)
 def test_model(args, task_name, logger):
     global input_lang
     global output_lang
 
-    input_lang, output_lang, pairs_train, pairs_dev, pairs_test, pairs_gen = prepare_dataset('nl', 'sparql', task_name)
+    input_lang, output_lang, pairs_train, pairs_dev, pairs_test, pairs_gen = prepare_dataset('nl', 'logicform', task_name)
 
     test_data = pairs_gen
     test_data.sort(key=lambda p: len(p[0].split()))
@@ -678,31 +702,19 @@ def test_model(args, task_name, logger):
     args.label_size = output_lang.n_words
 
     # read pre-alignment file
-    alignment_filename = './preprocess/enct2dect'
+    alignment_filename = os.path.join(PREPROCESS_DATADIR, 'enct2dect')
     alignments_idx = get_alignment(alignment_filename, input_lang, output_lang)
 
-    entity_list = []
-    entity_filename = './preprocess/entity'
-    with open(entity_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            entity_list.append(decode_token.strip("\n"))
+    entity_filename = os.path.join(PREPROCESS_DATADIR, 'entity')
+    entity_list = read_list_from_file(entity_filename)
 
-    caus_predicate_list = []
-    caus_predicate_filename = './preprocess/caus_predicate'
-    with open(caus_predicate_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            caus_predicate_list.append(decode_token.strip("\n"))
+    caus_predicate_filename = os.path.join(PREPROCESS_DATADIR, 'caus_predicate')
+    caus_predicate_list = read_list_from_file(caus_predicate_filename)
 
-    unac_predicate_list = []
-    unac_predicate_filename = './preprocess/unac_predicate'
-    with open(unac_predicate_filename, 'r') as f:
-        decode_tokens = f.readlines()
-        for decode_token in decode_tokens:
-            unac_predicate_list.append(decode_token.strip("\n"))
+    unac_predicate_filename = os.path.join(PREPROCESS_DATADIR, 'unac_predicate')
+    unac_predicate_list = read_list_from_file(unac_predicate_filename)
 
-    example2type_file = './preprocess/example2type'
+    example2type_file = os.path.join(PREPROCESS_DATADIR, 'example2type')
     with open(example2type_file, 'r') as f:
         example2type = json.load(f)
 
@@ -735,10 +747,10 @@ def test_model(args, task_name, logger):
         # test_lesson_idx = -1
         test_data = test_data[:test_lesson_idx]
     random.shuffle(test_data)
-    print("Start testing ..")
-    log_file = './log/' + re.split('/|\.', checkpoint_file)[-3] + "_" + re.split('/|\.', checkpoint_file)[-2] + '.txt'
+    print("Start testing ..")  # pw todo better way of retrieving log file? not used in test() after all? just delete below line then?
+    # log_file = './log/' + re.split('/|\.', checkpoint_file)[-3] + "_" + re.split('/|\.', checkpoint_file)[-2] + '.txt'
     # pdb.set_trace()
-    test_acc, type_right_count = test(test_data, model, example2type, args.gpu_id, log_file)
+    test_acc, type_right_count = test(test_data, model, example2type, args.gpu_id, log_file=None)
     print("Test Acc: {} %".format(test_acc * 100))
     for type in type_right_count:
         type_acc = sum(type_right_count[type]) / len(type_right_count[type])
@@ -750,8 +762,8 @@ def prepare_arguments(checkpoint_folder, parser):
     low_lr = 0.1     # 0.1
     accumulate_batch_size = 1
     regular_weight = 1e-1   # 1e-1
-    regular_decay_rate = 0.5
-    simplicity_reward_rate = 0.5
+    regular_decay_rate = 0.5  # pw todo is this even used?
+    simplicity_reward_rate = 0.5 # pw todo is this alpha? in the paper alpha is 1.0 for COGS and 0.5 for CFQ. Is this even ever queried in the code?
     hidden_size = 128
     encode_mode = 'seq'
 
@@ -759,24 +771,27 @@ def prepare_arguments(checkpoint_folder, parser):
             "hidden-dim": hidden_size,
             "composer_leaf": "no_transformation",   # no_transformation | bi_lstm_transformation
             "composer-trans-hidden": hidden_size,
-            "var-normalization": "True",
+            "var-normalization": "True",  # pw todo passed on to HRLmodel, but there only stored, but never queried
             "regular-weight": regular_weight,  # 0.0001
+            # optimizer options (high: composer, low: solver)
+            # pw todo env and pol: even used? should it rather be high and low? (in paper p.6 sec5: AdaDelta used)
             "clip-grad-norm": 0.5,
             "env-optimizer": "adadelta",  # adadelta
             "pol-optimizer": "adadelta",  # adadelta
             "high-lr": high_lr,  # 1.
             "low-lr": low_lr,  # 0.1
-            "epsilon": 0.2,
-            "l2-weight": 0.0001,
+            "epsilon": 0.2,  # pw todo is this even used? I don't think so
+            "l2-weight": 0.0001,  # weight decay
+            # other parameters
             "batch-size": 1,
             "accumulate-batch-size": accumulate_batch_size,
             "max-epoch": 30,
             "gpu-id": 0,
-            "model-dir": "checkpoint/models/" + checkpoint_folder,
+            "model-dir": "checkpoint/models/" + checkpoint_folder,  # pw todo don't hard code file paths that way
             "logs-path": "checkpoint/logs/" + checkpoint_folder,
             "encode-mode": encode_mode,
-            "regular-decay-rate": regular_decay_rate,
-            "x-ratio-rate": simplicity_reward_rate}
+            "regular-decay-rate": regular_decay_rate,  # pw todo is this even used? I don't think so
+            "x-ratio-rate": simplicity_reward_rate}  # pw todo is this even used? I don't think so
 
     parser.add_argument("--word-dim", required=False, default=args["word-dim"], type=int)
     parser.add_argument("--hidden-dim", required=False, default=args["hidden-dim"], type=int)
@@ -828,8 +843,10 @@ if __name__ == "__main__":
     arg_parser.add_argument("--task", required=True, type=str,
                             choices=["addjump", "around_right", "simple", "length",
                                      "extend", "mcd1", "mcd2", "mcd3", "cfq", "cogs"],
-                            help="All tasks on SCAN, the task name is used to load train or test file")
+                            help="All tasks on SCAN, the task name is used to load train or test file")  # todo: help-msg ? actually task is always cogs (prepare_dataset)
     arg_parser.add_argument("--random-seed", required=False, default=2, type=int)
+    # pw todo: uniform treatment of checkpoint arg missing (for train it is just a name, for test it is a path...)
+    # pw todo: arg parsing of other options (see prepare_args) don't work: try adding an option like --gpu-id 2 or --max-epoch 1: will fail with 'unrecognized arguments'
 
     parsed_args = arg_parser.parse_args()
     if parsed_args.mode == 'train':
