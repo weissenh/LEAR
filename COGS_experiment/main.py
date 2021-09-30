@@ -28,7 +28,7 @@ global_step = 0
 
 COGS_DATADIR = "./cogs_data/"
 TRAIN_FILENAME = "train.tsv"  # as opposed to train_100.tsv  # for each train set separate preprocessing!
-PREPROCESS_DATADIR = "./preprocess/"
+PREPROCESS_DATADIR = "./preprocess/"  # might want to customize this for train100?
 
 class Lang:
     def __init__(self, name):
@@ -253,6 +253,9 @@ def test(test_data, model, example2type, device, log_file=None):
     model.eval()
     start = time.time()
 
+    # todo: to prevent overwriting these files by separate runs, maybe customize
+    # filepath based on command line input or always remember to change it here
+    # [PW: change this]
     file_right = './gen_right.txt'
     file_wrong = './gen_wrong.txt'
 
@@ -295,20 +298,22 @@ def test(test_data, model, example2type, device, log_file=None):
 
             type_right_count[example_type].append(accuracy.item())
 
-            # if accuracy == 1:  # pw todo rather have verbosity flag, also better overall 'w' than 'a' (re-runs)?
-            #     with open(file_right, 'a') as f:
-            #         f.write(example_type + '\n')
-            #         f.write(test_data_example[0] + '\n')
-            #         f.write(test_data_example[1] + '\n')
-            #         f.write(" ".join(pred_chain) + '\n')
-            #         f.write(" ".join(label_chain) + '\n\n')
-            # else:
-            #     with open(file_wrong, 'a') as f:
-            #         f.write(example_type + '\n')
-            #         f.write(test_data_example[0] + '\n')
-            #         f.write(test_data_example[1] + '\n')
-            #         f.write(" ".join(pred_chain) + '\n')
-            #         f.write(" ".join(label_chain) + '\n\n')
+            if accuracy == 1:
+                # todo rather have verbosity flag, also better overall 'w' than 'a' (re-runs)?
+                # [PW: change this]
+                with open(file_right, 'a') as f:
+                    f.write(example_type + '\n')
+                    f.write(test_data_example[0] + '\n')
+                    f.write(test_data_example[1] + '\n')
+                    f.write(" ".join(pred_chain) + '\n')
+                    f.write(" ".join(label_chain) + '\n\n')
+            else:
+                with open(file_wrong, 'a') as f:
+                    f.write(example_type + '\n')
+                    f.write(test_data_example[0] + '\n')
+                    f.write(test_data_example[1] + '\n')
+                    f.write(" ".join(pred_chain) + '\n')
+                    f.write(" ".join(label_chain) + '\n\n')
 
             ce_loss = accuracy
             n = 1
@@ -846,7 +851,7 @@ if __name__ == "__main__":
                             help="All tasks on SCAN, the task name is used to load train or test file")  # todo: help-msg ? actually task is always cogs (prepare_dataset)
     arg_parser.add_argument("--random-seed", required=False, default=2, type=int)
     # pw todo: uniform treatment of checkpoint arg missing (for train it is just a name, for test it is a path...)
-    # pw todo: arg parsing of other options (see prepare_args) don't work: try adding an option like --gpu-id 2 or --max-epoch 1: will fail with 'unrecognized arguments'
+    # [PW: change this] todo: arg parsing of other options (see prepare_args) don't work: try adding an option like --gpu-id 2 or --max-epoch 1: will fail with 'unrecognized arguments'
 
     parsed_args = arg_parser.parse_args()
     if parsed_args.mode == 'train':
