@@ -22,10 +22,12 @@ pip install -r requirements.txt
   - `caus_predicate`: output tokens defining caus predicates (triggered by verbs on the input side)
   - `unac_predicate`: output tokens defining unac predicates (triggered by verbs on the input side)
   - `encode_tokens.txt`: input tokens (all tokens on the input side, even including punctuation, copula verb etc)
-  - `enct2dect`: json-object mapping input tokens to output tokens (phrase table): described in appendix D, [page 13f](https://aclanthology.org/2021.findings-acl.97.pdf#page=13) in Liu et al. 2021.
+  - `enct2dect`: json-object mapping input tokens to output tokens (phrase table/alignment file): described in appendix D, [page 13f](https://aclanthology.org/2021.findings-acl.97.pdf#page=13) in Liu et al. 2021.
   - `entity`: output tokens defining entities (triggered by nouns on the input side)
   - `example2type`: json-object mapping sentences from the gen set to generalization types
-  - **to do**: how were the preprocess files generated? code not published
+  - **to do**: how were the preprocess files generated? code not published, PW working on own reimplementation: `do_preprocessing.py`
+
+These file paths and file names are hard-coded in various places inside `main.py`
 
 ## Training
 
@@ -45,14 +47,20 @@ python3 main.py --mode train --checkpoint model2 --task cogs
 ```
 will create `./checkpoint/logs/model2.log` and a few `.mdl` files in `./checkpoint/models/model2/`.
 
-The `checkpoint/logs` and `checkpoint/models` relative paths are hard-coded in 
-`main.py:prepare_arguments` in the `args` dictionary variable,
-but you can also provide your own paths, using one or both of the optional `--model-dir` and `--logs-path`options:
-`--model-dir ./checkpoint/models/mymodel --logs-path ./checkpoint/logs/mymodel`, 
-If you provide both (model dir and logs path), then you still need to provide 
-the `--checkpoint` option, although it isn't used internally then.
 
-*Tipp*: by default 2 is used as the random seed, change this by adding `--random-seed INTEGER`
+**Customizations**  
+1. *Specifying own paths for model weights and log files*:  
+The `checkpoint/logs` and `checkpoint/models` relative paths are hard-coded in 
+`main.py` in global variables at the top of the file and present the default 
+values for `--model-dir-prefix` and `--logs-path-prefix` command line options 
+respectively. Note that these two are only prefixes, so you still have provide
+the `--checkpoint` option, as it will specify the file or folder name within 
+logs and model directory respectively. So internally it is used
+`--model-dir-prefix ./checkpoint/models/ --logs-path-prefix ./checkpoint/logs/`
+2. *Changing the random seed*:  
+The default is random seed 2, you can change it by adding `--random-seed SOMEINTEGER`
+3. *Further options*:  
+Run `python3 main.py --help` to list all available options.
 
 
 ## Evaluation
@@ -80,6 +88,27 @@ Example call:
 python3 main.py --mode test --checkpoint ./checkpoint/models/model2/0-final.mdl --task cogs
 ```
 
+Note that the output is not a TSV file with logical form like the gold file.
+Rather so far the code can only output the internal representation used by LeAR,
+see `gen_right.txt` and `gen_wrong.txt` files (output when run it test mode):
+```
+obj_pp_to_subj_pp
+a girl beside a nest liked that the pickle on a book doubled
+Gold LF:  * pickle ( x _ 8 ) ; girl ( x _ 1 ) and girl . nmod . beside ( x _ 1 , x _ 4 ) and nest ( x _ 4 ) and like . agent ( x _ 5 , x _ 1 ) and like . ccomp ( x _ 5 , x _ 12 ) and pickle . nmod . on ( x _ 8 , x _ 11 ) and book ( x _ 11 ) and double . theme ( x _ 12 , x _ 8 )
+Pred:  like girl beside nest None None ccomp double pickle on book None None
+Gold:  like girl beside nest None None ccomp double None pickle on book None
+
+```
+The accuracy is therefore also not calculated on the logical forms directly,
+but on these internal representations (see `model.py:HRLModel.get_reward()` about line 900, and e.g. `main.py:test()`about line 408: accuracy only 1 if reward 1 else 0)
+
+By the way, the effect of the determiner 
+(`*` for definite, but not indefinite determiners in the logical form)
+is not considered here:
+- `model.py:HRLModel.process_output()`, that's about Line 979, tied to that:
+- the output above: notice no difference in internal representation between indefinite 'a girl' and definite 'the pickle'
+- and that words with no alignments ignored: `forward()` of bottom abstractor: only if alignment found ("the" not in enct2dect found: no alignment) added to bottom-span 
+- also not found in semantic (P/E classes side)
 
 --------------------
 
